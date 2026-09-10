@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.runtime/
+.env
+.env.local
+coverage/
+*.log
+data/
+.tmp-asar/
+/fwb/
+/firmware-flash-20260908/
+/firmware/xiaozhi-esp32/.github/

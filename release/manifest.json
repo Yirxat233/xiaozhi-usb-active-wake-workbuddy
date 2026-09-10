@@ -1,0 +1,54 @@
+{
+  "version": "2.2.3-taiji-pdm-wb3",
+  "hardware": "JC3636W518 V2 / taiji-pi-s3-pdm / 16MB flash / 8MB PSRAM",
+  "esp_idf": "5.5.2",
+  "base": "https://github.com/78/xiaozhi-esp32/tree/v2.2.3",
+  "active_speak_pr": "https://github.com/78/xiaozhi-esp32/pull/1939",
+  "pr_head": "16144bb612fe17a5c689be64094b9a9cfff7123b",
+  "usb_mode": "host audio input -> official xiaozhi.me conversation -> cloud TTS",
+  "merged_flash_address": "0x0",
+  "merged_resets_nvs": true,
+  "actual_flash_preserved_nvs": true,
+  "files": {
+    "LOCAL_USB_GUIDE.md": {
+      "bytes": 3882,
+      "sha256": "e823d901daf016aa8ec364d73c968f171473cc6a4ca319e815cab7895793780f"
+    },
+    "segments/bootloader/bootloader.bin": {
+      "bytes": 16432,
+      "sha256": "a1b7f85404c8879067e243342ce63ed6f8f5e8e4083c5ce20d9ba20687f2440a"
+    },
+    "segments/partition_table/partition-table.bin": {
+      "bytes": 3072,
+      "sha256": "4811619cacae08ef2e0e71b7220c6033a346ca5da7ca179082408c963ef530b5"
+    },
+    "segments/ota_data_initial.bin": {
+      "bytes": 8192,
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    "segments/xiaozhi.bin": {
+      "bytes": 2806288,
+      "sha256": "5b20dd326f899f5b669a3d8d74d4c4e0210ff8eed2fe0c8ca2933b6f613c7e09"
+    },
+    "segments/generated_assets.bin": {
+      "bytes": 1592531,
+      "sha256": "96f804117e749d3bacd938a5039b4aab47629ebe5cd6010792497b0bfe8c9d98"
+    },
+    "segments/flasher_args.json": {
+      "bytes": 1218,
+      "sha256": "9fd96249f3fdee582a753cf65efd501f60893295a925ab647e3a2ed6d0904bdc"
+    },
+    "upstream-pr-1939.diff": {
+      "bytes": 71792,
+      "sha256": "fb092e7ba1d1fa56c7bc99e8e6e814132c359dfacf012660e0ce7c0452dbe090"
+    },
+    "xiaozhi-2.2.3-taiji-pi-s3-v2-active-speak-workbuddy-wb3-source.zip": {
+      "bytes": 4735129,
+      "sha256": "47106c44348d88bc51644d620a47864b073aad64bca0592021fab36f371467a9"
+    },
+    "xiaozhi-2.2.3-taiji-pi-s3-v2-active-speak-workbuddy-wb3.bin": {
+      "bytes": 9981139,
+      "sha256": "5a9babef949bde98a10baccc3fe1c936be7ae9503c1dadccc0fbcedf109409c6"
+    }
+  }
+}

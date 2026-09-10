@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>小智 × WorkBuddy 调试台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="noise"></div>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">XW</div>
+          <div>
+            <p class="eyebrow">XIAOZHI × WORKBUDDY</p>
+            <h1>Bridge 调试控制台</h1>
+          </div>
+        </div>
+        <div class="top-actions">
+          <label class="auto-refresh">
+            <input id="auto-refresh" type="checkbox" checked />
+            <span>自动刷新</span>
+          </label>
+          <button id="refresh-button" class="button secondary">立即刷新</button>
+          <button id="notification-button" class="button secondary">启用系统通知</button>
+          <span id="clock" class="clock">--:--:--</span>
+        </div>
+      </header>
+
+      <section class="status-strip" aria-label="连接状态">
+        <div class="status-item" data-status="bridge">
+          <span class="status-dot"></span>
+          <div><small>BRIDGE HTTP</small><strong id="bridge-status">检查中</strong></div>
+        </div>
+        <div class="status-item" data-status="mcp">
+          <span class="status-dot"></span>
+          <div><small>LOCAL MCP</small><strong id="mcp-status">尚未探测</strong></div>
+        </div>
+        <div class="status-item" data-status="xiaozhi-mcp">
+          <span class="status-dot"></span>
+          <div><small>XIAOZHI MCP CLOUD</small><strong id="xiaozhi-mcp-status">检查中</strong></div>
+        </div>
+        <div class="status-item" data-status="workbuddy">
+          <span class="status-dot"></span>
+          <div><small>WORKBUDDY</small><strong id="workbuddy-status">检查中</strong></div>
+        </div>
+        <div class="status-item" data-status="device">
+          <span class="status-dot"></span>
+          <div><small>SPEAK QUEUE</small><strong id="device-status">检查中</strong></div>
+        </div>
+        <button id="mcp-probe-button" class="button probe">运行 MCP 探针</button>
+      </section>
+
+      <section class="flow-card panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">LIVE PATH</p><h2>消息链路</h2></div>
+          <span id="last-update" class="muted">等待数据</span>
+        </div>
+        <div class="flow">
+          <div class="flow-node" id="node-voice"><span>01</span><strong>语音 / MCP</strong><small>用户指令入口</small></div>
+          <div class="flow-link"><i></i><b>HTTP</b></div>
+          <div class="flow-node" id="node-bridge"><span>02</span><strong>Bridge</strong><small>意图与事件路由</small></div>
+          <div class="flow-link"><i></i><b>CLI</b></div>
+          <div class="flow-node" id="node-workbuddy"><span>03</span><strong>WorkBuddy</strong><small>项目任务执行</small></div>
+          <div class="flow-link reverse"><i></i><b>EVENT</b></div>
+          <div class="flow-node" id="node-device"><span>04</span><strong>小智设备</strong><small>speak_request</small></div>
+        </div>
+      </section>
+
+      <div class="main-grid">
+        <section class="panel command-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">COMMAND CENTER</p><h2>语音命令模拟</h2></div>
+          </div>
+          <form id="voice-form" class="command-form">
+            <textarea id="voice-input" rows="3" placeholder="输入小智听到的内容，例如：查询一下近三天的项目清单"></textarea>
+            <div class="command-actions">
+              <div class="quick-commands">
+                <button type="button" data-command="查询一下近三天的项目清单">近三天项目</button>
+                <button type="button" data-command="打开 Bridge 项目">打开 Bridge</button>
+                <button type="button" data-command="继续执行项目">继续项目</button>
+                <button type="button" data-command="允许继续">回答允许</button>
+              </div>
+              <button class="button primary" type="submit">发送命令 <span>↗</span></button>
+            </div>
+          </form>
+          <div id="command-response" class="command-response empty">命令响应将在这里显示</div>
+
+          <form id="xiaozhi-mcp-form" class="cloud-connect-form">
+            <div>
+              <p class="eyebrow">XIAOZHI MCP CREDENTIAL</p>
+              <h3>连接真实小智云端</h3>
+              <small>地址仅保存在 Bridge 进程内存中，页面与日志不会显示 Token。</small>
+            </div>
+            <input id="xiaozhi-mcp-endpoint" type="password" autocomplete="off" spellcheck="false" placeholder="wss://api.xiaozhi.me/mcp/?token=…" />
+            <div class="cloud-connect-actions">
+              <button class="button primary" type="submit">连接云端 MCP</button>
+              <button id="xiaozhi-mcp-disconnect" class="button secondary" type="button">断开</button>
+            </div>
+          </form>
+
+          <div class="device-control">
+            <div><p class="eyebrow">DEVICE OVERRIDE</p><h3>模拟设备状态</h3></div>
+            <div id="device-buttons" class="state-buttons">
+              <button data-state="idle">idle</button>
+              <button data-state="speaking">speaking</button>
+              <button data-state="listening">listening</button>
+              <button data-state="offline">offline</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel diagnosis-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">DIAGNOSIS</p><h2>故障判断</h2></div>
+            <span id="issue-count" class="counter">0</span>
+          </div>
+          <div id="diagnosis-list" class="diagnosis-list">
+            <div class="diagnosis neutral"><span>···</span><div><strong>正在采集状态</strong><p>等待 Bridge 返回诊断快照</p></div></div>
+          </div>
+          <div class="metrics">
+            <div><small>待播报</small><strong id="queue-count">0</strong></div>
+            <div><small>项目数</small><strong id="project-count">0</strong></div>
+            <div><small>事件数</small><strong id="event-count">0</strong></div>
+            <div><small>已播报</small><strong id="notification-count">0</strong></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel projects-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">WORKBUDDY PROJECTS</p><h2>项目状态</h2></div>
+        </div>
+        <div id="projects" class="projects"><p class="empty-state">暂无项目数据</p></div>
+      </section>
+
+      <section class="panel sessions-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">SESSION RECOVERY MAP</p><h2>历史 Session 映射</h2></div>
+          <span id="recovery-state" class="muted">等待扫描</span>
+        </div>
+        <div id="adapter-paths" class="adapter-paths"></div>
+        <div id="sessions" class="sessions"><p class="empty-state">暂无历史 Session</p></div>
+      </section>
+
+      <div class="lower-grid">
+        <section class="panel timeline-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">EVENT STREAM</p><h2>事件时间线</h2></div>
+          </div>
+          <div id="events" class="timeline"><p class="empty-state">尚无事件</p></div>
+        </section>
+
+        <section class="panel protocol-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">PROTOCOL TRACE</p><h2>speak_request 记录</h2></div>
+          </div>
+          <div id="notifications" class="protocol-list"><p class="empty-state">尚未产生主动播报</p></div>
+        </section>
+      </div>
+
+      <section class="panel logs-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">CLIENT LOG</p><h2>调试日志</h2></div>
+          <button id="clear-logs" class="text-button">清空</button>
+        </div>
+        <div id="logs" class="logs"></div>
+      </section>
+    </main>
+    <div id="event-alert" class="event-alert" role="dialog" aria-modal="true" aria-labelledby="event-alert-title">
+      <div class="event-alert-card">
+        <div class="event-alert-mark" id="event-alert-mark">✓</div>
+        <div class="event-alert-copy">
+          <p class="eyebrow" id="event-alert-kind">WORKBUDDY EVENT</p>
+          <h2 id="event-alert-title">任务状态更新</h2>
+          <p id="event-alert-message"></p>
+          <small id="event-alert-time"></small>
+        </div>
+        <button id="event-alert-close" class="button primary">知道了</button>
+      </div>
+    </div>
+    <div id="toast" class="toast"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
