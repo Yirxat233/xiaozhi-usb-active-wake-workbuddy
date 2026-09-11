@@ -78,9 +78,11 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
                    to == kDeviceStateWifiConfiguring;
 
         case kDeviceStateConnecting:
-            // Can go to idle (failed) or listening (success)
+            // USB local playback moves directly from connecting to speaking after the
+            // application task has prepared the decoder.
             return to == kDeviceStateIdle ||
-                   to == kDeviceStateListening;
+                   to == kDeviceStateListening ||
+                   to == kDeviceStateSpeaking;
 
         case kDeviceStateListening:
             // Can go to speaking or idle

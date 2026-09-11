@@ -6,10 +6,12 @@
 #include <freertos/task.h>
 #include <esp_timer.h>
 
-#include <string>
-#include <mutex>
+#include <atomic>
 #include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <string>
 
 #include "protocol.h"
 #include "ota.h"
@@ -112,6 +114,12 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+
+    // Feed host-generated Opus into a normal Xiaozhi cloud conversation without a wake word.
+    void BeginExternalAudioInput(std::function<void(bool)>&& on_ready);
+    bool SendExternalAudio(std::unique_ptr<AudioStreamPacket> packet);
+    void FinishExternalAudioInput();
+    void CancelExternalAudioInput();
     
     /**
      * Reset protocol resources (thread-safe)
@@ -135,6 +143,7 @@ private:
     std::string last_error_message_;
     AudioService audio_service_;
     std::unique_ptr<Ota> ota_;
+    std::atomic<bool> external_audio_input_{false};
 
     bool has_server_time_ = false;
     bool aborted_ = false;

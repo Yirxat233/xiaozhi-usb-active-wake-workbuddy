@@ -1,4 +1,5 @@
 #include "application.h"
+#include "local_usb_bridge.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -219,6 +220,11 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                // During a USB-injected turn, send only host audio. Microphone frames would
+                // otherwise be mixed into the synthetic user message.
+                if (external_audio_input_) {
+                    continue;
+                }
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
                     break;
                 }
@@ -512,6 +518,8 @@ void Application::InitializeProtocol() {
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
+            external_audio_input_ = false;
+            LocalUsbBridge::GetInstance().OnCloudRequestFailed("audio_channel_closed");
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
@@ -527,16 +535,23 @@ void Application::InitializeProtocol() {
                 Schedule([this]() {
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
+                    LocalUsbBridge::GetInstance().OnCloudReplyStarted();
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
+                            // Drain the speaker before re-enabling WakeNet. This prevents the
+                            // notification tail from waking the device back into listening.
+                            audio_service_.EnableWakeWordDetection(false);
+                            audio_service_.WaitForPlaybackQueueEmpty();
+                            vTaskDelay(pdMS_TO_TICKS(200));
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
                         }
                     }
+                    LocalUsbBridge::GetInstance().OnCloudReplyFinished();
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
@@ -911,8 +926,12 @@ void Application::HandleStateChangedEvent() {
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
-                // Only AFE wake word can be detected in speaking mode
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                // Ordinary chat keeps barge-in. USB cloud input disables it so the device
+                // cannot hear its own answer and return to listening unexpectedly.
+                const bool allow_barge_in =
+                    !LocalUsbBridge::GetInstance().IsCloudInputActive() &&
+                    audio_service_.IsAfeWakeWord();
+                audio_service_.EnableWakeWordDetection(allow_barge_in);
             }
             audio_service_.ResetDecoder();
             break;
@@ -935,11 +954,59 @@ void Application::Schedule(std::function<void()>&& callback) {
 }
 
 void Application::AbortSpeaking(AbortReason reason) {
+    if (LocalUsbBridge::GetInstance().IsLocalPlaybackActive()) {
+        LocalUsbBridge::GetInstance().Cancel();
+        return;
+    }
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }
+}
+
+void Application::BeginExternalAudioInput(std::function<void(bool)>&& on_ready) {
+    if (!protocol_ || GetDeviceState() != kDeviceStateIdle || external_audio_input_.exchange(true)) {
+        on_ready(false);
+        return;
+    }
+
+    SetDeviceState(kDeviceStateConnecting);
+    Schedule([this, on_ready = std::move(on_ready)]() mutable {
+        if (!protocol_ || GetDeviceState() != kDeviceStateConnecting ||
+            (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel())) {
+            external_audio_input_ = false;
+            SetDeviceState(kDeviceStateIdle);
+            on_ready(false);
+            return;
+        }
+
+        listening_mode_ = kListeningModeManualStop;
+        SetDeviceState(kDeviceStateListening);
+        Schedule([this, on_ready = std::move(on_ready)]() mutable {
+            on_ready(external_audio_input_ && GetDeviceState() == kDeviceStateListening);
+        });
+    });
+}
+
+bool Application::SendExternalAudio(std::unique_ptr<AudioStreamPacket> packet) {
+    return external_audio_input_ && protocol_ && GetDeviceState() == kDeviceStateListening &&
+           protocol_->SendAudio(std::move(packet));
+}
+
+void Application::FinishExternalAudioInput() {
+    if (!external_audio_input_.exchange(false) || !protocol_) {
+        return;
+    }
+    protocol_->SendStopListening();
+}
+
+void Application::CancelExternalAudioInput() {
+    external_audio_input_ = false;
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+    SetDeviceState(kDeviceStateIdle);
 }
 
 void Application::SetListeningMode(ListeningMode mode) {
@@ -1116,4 +1183,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-

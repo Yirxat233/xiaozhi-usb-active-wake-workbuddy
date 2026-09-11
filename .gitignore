@@ -2,11 +2,13 @@ tmp/
 components/
 managed_components/
 build/
+build-workbuddy-*/
 dist/
 .vscode/
 .devcontainer/
 sdkconfig.old
 sdkconfig
+sdkconfig.workbuddy.*
 dependencies.lock
 .env
 releases/

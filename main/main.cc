@@ -8,6 +8,7 @@
 #include <freertos/task.h>
 
 #include "application.h"
+#include "local_usb_bridge.h"
 
 #define TAG "main"
 
@@ -25,5 +26,6 @@ extern "C" void app_main(void)
     // Initialize and run the application
     auto& app = Application::GetInstance();
     app.Initialize();
+    LocalUsbBridge::GetInstance().Start();
     app.Run();  // This function runs the main event loop and never returns
 }
