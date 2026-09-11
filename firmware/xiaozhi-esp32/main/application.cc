@@ -543,6 +543,12 @@ void Application::InitializeProtocol() {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
+                            // The cloud can announce TTS stop before the speaker has drained its
+                            // decoded queue.  If idle immediately re-enables WakeNet, the tail of
+                            // the device's own notification can wake it back into listening.
+                            audio_service_.EnableWakeWordDetection(false);
+                            audio_service_.WaitForPlaybackQueueEmpty();
+                            vTaskDelay(pdMS_TO_TICKS(200));
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
@@ -927,8 +933,11 @@ void Application::HandleStateChangedEvent() {
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
-                // Only AFE wake word can be detected in speaking mode
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                // Barge-in is useful during ordinary conversations, but a USB-triggered cloud
+                // notification must not hear its own speaker and turn itself back on.
+                const bool allow_barge_in =
+                    !LocalUsbBridge::GetInstance().IsCloudInputActive() && audio_service_.IsAfeWakeWord();
+                audio_service_.EnableWakeWordDetection(allow_barge_in);
             }
             audio_service_.ResetDecoder();
             break;

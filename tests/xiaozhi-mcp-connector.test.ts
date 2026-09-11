@@ -73,6 +73,9 @@ test("Xiaozhi WebSocket connector serves bridge MCP tools and records calls", as
     assert.equal(connector.getStatus().connected, true);
     assert.equal(connector.getStatus().toolCallCount, 1);
     assert.equal(connector.getStatus().messageCount, 4);
+    assert.equal(connector.getStatus().lastToolName, "workbuddy_list_projects");
+    assert.deepEqual(connector.getStatus().recentToolNames, ["workbuddy_list_projects"]);
+    assert.ok(connector.getStatus().lastToolCallAt);
     await connector.disable();
     assert.equal(connector.getStatus().state, "disabled");
   } finally {

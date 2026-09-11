@@ -39,7 +39,7 @@ void LocalUsbBridge::Reply(const std::string& id, const char* type, const char* 
     auto root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "id", id.c_str());
     cJSON_AddStringToObject(root, "type", type);
-    cJSON_AddStringToObject(root, "firmware", "2.2.3-taiji-pdm-wb3");
+    cJSON_AddStringToObject(root, "firmware", "2.2.3-taiji-pdm-wb4");
     cJSON_AddStringToObject(root, "state", DeviceStateMachine::GetStateName(Application::GetInstance().GetDeviceState()));
     cJSON_AddBoolToObject(root, "local_active", active_.load());
     if (error) cJSON_AddStringToObject(root, "error", error);
@@ -80,6 +80,10 @@ void LocalUsbBridge::OnCloudReplyFinished() {
     mode_ = UsbBridgeMode::None;
     waiting_for_cloud_reply_ = false;
     completion_id_.clear();
+    // A cloud reply can otherwise leave the audio channel open or the display/audio
+    // pipeline in listening state. Tear down external input explicitly before the host
+    // is told the notification succeeded.
+    Application::GetInstance().CancelExternalAudioInput();
     Reply(id, "cloud_done");
 }
 

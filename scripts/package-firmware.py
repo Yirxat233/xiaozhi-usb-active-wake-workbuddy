@@ -10,7 +10,7 @@ source = root / 'fwb/src'
 build = source / 'build'
 release = root / 'firmware-flash-20260908/release'
 release.mkdir(parents=True, exist_ok=True)
-name = 'xiaozhi-2.2.3-taiji-pi-s3-v2-active-speak-workbuddy-wb2'
+name = 'xiaozhi-2.2.3-taiji-pi-s3-v2-active-speak-workbuddy-wb4'
 shutil.copy2(build / 'merged-binary.bin', release / f'{name}.bin')
 args = json.loads((build / 'flasher_args.json').read_text())
 for relative in args['flash_files'].values():
@@ -29,7 +29,7 @@ with zipfile.ZipFile(release / f'{name}-source.zip', 'w', zipfile.ZIP_DEFLATED) 
             archive.write(path, Path('xiaozhi-esp32') / relative)
     archive.write(root / 'fwb/build-firmware.ps1', 'build-firmware.ps1')
 manifest = {
-    'version': '2.2.3-taiji-pdm-wb2',
+    'version': '2.2.3-taiji-pdm-wb4',
     'hardware': 'JC3636W518 V2 / taiji-pi-s3-pdm / 16MB flash / 8MB PSRAM',
     'esp_idf': '5.5.2',
     'base': 'https://github.com/78/xiaozhi-esp32/tree/v2.2.3',

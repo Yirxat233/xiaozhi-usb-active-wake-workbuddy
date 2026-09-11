@@ -4,6 +4,18 @@ import * as z from "zod/v4";
 import type { BridgeRuntime } from "./bridge.js";
 import type { XiaozhiMcpStatus } from "./xiaozhi-mcp-connector.js";
 
+export interface StagedUsbWorkBuddyCommand {
+  id: string;
+  project: string;
+  message: string;
+}
+
+type BridgeMcpOptions = {
+  getXiaozhiMcpStatus?: () => XiaozhiMcpStatus;
+  peekUsbCommand?: () => StagedUsbWorkBuddyCommand | undefined;
+  claimUsbCommand?: () => StagedUsbWorkBuddyCommand | undefined;
+};
+
 const jsonResult = (message: string, data: unknown) => ({
   content: [{ type: "text" as const, text: message }],
   structuredContent: { data } as Record<string, unknown>,
@@ -25,13 +37,13 @@ const safely = <TArgs extends unknown[]>(handler: (...args: TArgs) => Promise<Re
 
 export function createBridgeMcpServer(
   runtime: BridgeRuntime,
-  options: { getXiaozhiMcpStatus?: () => XiaozhiMcpStatus } = {},
+  options: BridgeMcpOptions = {},
 ): McpServer {
   const server = new McpServer(
     { name: "xiaozhi-workbuddy-bridge", version: "0.1.0" },
     {
       instructions:
-        "用于通过小智语音控制 WorkBuddy 项目。项目状态变化会自动进入小智主动播报队列。用户回答刚才的 WorkBuddy 提问时，先查询 workbuddy_list_pending_questions，再用 workbuddy_reply_to_question 将回答交回同一项目。",
+        "用于通过小智语音控制 WorkBuddy 项目。不要猜测或拼接文件夹路径；先调用 workbuddy_list_projects 获取真实项目名或 ID。用户要求发送消息、继续任务或执行工作时，必须调用 workbuddy_send_message 或 workbuddy_continue_project，不能只打开项目或口头回复。workbuddy_send_message 只接受准确项目名或 ID，不做模糊投递。项目提问、完成或失败会自动进入小智主动播报队列。用户回答刚才的 WorkBuddy 提问时，先查询 workbuddy_list_pending_questions，再用 workbuddy_reply_to_question 将回答交回同一项目。",
     },
   );
 
@@ -93,12 +105,43 @@ export function createBridgeMcpServer(
       }),
     },
     safely(async ({ query, instruction }) => {
-      let project = await runtime.workbuddy.openProject(query);
+      const staged = options.peekUsbCommand?.();
+      let project = await runtime.workbuddy.openProject(staged?.project ?? query);
       if (instruction?.trim()) {
-        project = await runtime.workbuddy.continueProject(project.id, instruction.trim());
+        const claimed = staged ? options.claimUsbCommand?.() : undefined;
+        project = await runtime.workbuddy.continueProject(project.id, claimed?.message ?? instruction.trim());
         return jsonResult(`已经打开项目“${project.name}”，并把指令提交到 WorkBuddy。`, project);
       }
       return jsonResult(`已经打开项目“${project.name}”。如需执行任务，请继续调用 workbuddy_continue_project。`, project);
+    }),
+  );
+
+  server.registerTool(
+    "workbuddy_send_message",
+    {
+      description: "按真实项目名或 ID 打开 WorkBuddy 项目，并把一条消息实际发送到该项目的 Agent 会话",
+      inputSchema: z.object({
+        project: z.string().trim().min(1).describe("workbuddy_list_projects 返回的准确项目名或 ID，不要填写自造路径"),
+        message: z.string().trim().min(1).describe("要实际交给 WorkBuddy 执行的消息"),
+      }),
+    },
+    safely(async ({ project: query, message }) => {
+      const staged = options.claimUsbCommand?.();
+      const requestedProject = staged?.project ?? query;
+      const projects = await runtime.workbuddy.listProjects();
+      const needle = requestedProject.trim().toLocaleLowerCase();
+      const exact = projects.filter((item) => item.id.toLocaleLowerCase() === needle || item.name.toLocaleLowerCase() === needle);
+      if (exact.length !== 1) {
+        throw new Error(exact.length
+          ? `项目名称不唯一：${requestedProject}；请使用准确项目 ID`
+          : `没有准确匹配项目“${requestedProject}”；请先调用 workbuddy_list_projects，禁止模糊投递`);
+      }
+      const opened = await runtime.workbuddy.openProject(exact[0]!.id);
+      const project = await runtime.workbuddy.continueProject(opened.id, staged?.message ?? message);
+      return jsonResult(
+        `消息已经发送到 WorkBuddy 项目“${project.name}”，Session ${project.sessionId ?? "正在建立"}。`,
+        project,
+      );
     }),
   );
 
@@ -120,14 +163,23 @@ export function createBridgeMcpServer(
   server.registerTool(
     "workbuddy_continue_project",
     {
-      description: "继续执行指定项目或当前已打开项目",
+      description: "继续执行指定项目或当前已打开项目；project_id 同时接受 workbuddy_list_projects 返回的准确项目名",
       inputSchema: z.object({
         project_id: z.string().optional(),
         instruction: z.string().optional(),
       }),
     },
     safely(async ({ project_id, instruction }) => {
-      const project = await runtime.workbuddy.continueProject(project_id, instruction);
+      const staged = options.claimUsbCommand?.();
+      let selectedId = project_id;
+      if (staged) {
+        const projects = await runtime.workbuddy.listProjects();
+        const needle = staged.project.trim().toLocaleLowerCase();
+        const exact = projects.filter((item) => item.id.toLocaleLowerCase() === needle || item.name.toLocaleLowerCase() === needle);
+        if (exact.length !== 1) throw new Error(`没有准确匹配 USB 指令项目“${staged.project}”`);
+        selectedId = exact[0]!.id;
+      }
+      const project = await runtime.workbuddy.continueProject(selectedId, staged?.message ?? instruction);
       return jsonResult(`项目“${project.name}”已经继续执行。`, project);
     }),
   );

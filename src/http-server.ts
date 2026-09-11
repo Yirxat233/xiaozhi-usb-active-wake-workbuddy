@@ -6,10 +6,12 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from "@modelcontextprotocol/node";
 import { BridgeRuntime } from "./bridge.js";
-import { createBridgeMcpServer } from "./mcp-server.js";
+import { createBridgeMcpServer, type StagedUsbWorkBuddyCommand } from "./mcp-server.js";
 import type { DeviceState, XiaozhiNotifier } from "./domain.js";
 import { UsbXiaozhiNotifier } from "./usb-xiaozhi.js";
 import { XiaozhiMcpConnector } from "./xiaozhi-mcp-connector.js";
+import { normalizeEndpoint } from "./xiaozhi-mcp-connector.js";
+import type { XiaozhiEndpointStore } from "./xiaozhi-endpoint-store.js";
 
 export interface BridgeServerHandle {
   runtime: BridgeRuntime;
@@ -30,6 +32,15 @@ const readJson = async (request: IncomingMessage): Promise<Record<string, unknow
   }
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+};
+
+const waitUntil = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  }
+  return predicate();
 };
 
 const sendJson = (response: ServerResponse, status: number, value: unknown): void => {
@@ -98,12 +109,14 @@ export async function startBridgeServer(options: {
   workbuddySessionRoot?: string;
   workbuddyConfigDir?: string;
   workbuddyStateFile?: string;
+  notificationQueueFile?: string;
   codebuddyCliScript?: string;
   workbuddyDesktopTransport?: "auto" | "desktop" | "cli";
   workbuddyDesktopTimeoutMs?: number;
   xiaozhiMcpEndpoint?: string;
   xiaozhiReconnectInitialMs?: number;
   xiaozhiReconnectMaxMs?: number;
+  xiaozhiMcpEndpointStore?: XiaozhiEndpointStore;
 } = {}): Promise<BridgeServerHandle> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
@@ -116,21 +129,43 @@ export async function startBridgeServer(options: {
     workbuddySessionRoot: options.workbuddySessionRoot,
     workbuddyConfigDir: options.workbuddyConfigDir,
     workbuddyStateFile: options.workbuddyStateFile,
+    notificationQueueFile: options.notificationQueueFile,
     codebuddyCliScript: options.codebuddyCliScript,
     workbuddyDesktopTransport: options.workbuddyDesktopTransport,
     workbuddyDesktopTimeoutMs: options.workbuddyDesktopTimeoutMs,
   });
   let xiaozhiMcp!: XiaozhiMcpConnector;
+  let pendingUsbCommand: (StagedUsbWorkBuddyCommand & { expiresAt: number }) | undefined;
+  const peekUsbCommand = (): StagedUsbWorkBuddyCommand | undefined => {
+    if (pendingUsbCommand && pendingUsbCommand.expiresAt > Date.now()) return pendingUsbCommand;
+    pendingUsbCommand = undefined;
+    return undefined;
+  };
+  const claimUsbCommand = (): StagedUsbWorkBuddyCommand | undefined => {
+    const command = peekUsbCommand();
+    pendingUsbCommand = undefined;
+    return command;
+  };
   const createCloudMcpServer = () => createBridgeMcpServer(runtime, {
     getXiaozhiMcpStatus: () => xiaozhiMcp.getStatus(),
+    peekUsbCommand,
+    claimUsbCommand,
   });
+  let initialXiaozhiEndpoint = options.xiaozhiMcpEndpoint;
+  if (!initialXiaozhiEndpoint && options.xiaozhiMcpEndpointStore) {
+    try { initialXiaozhiEndpoint = await options.xiaozhiMcpEndpointStore.load(); }
+    catch (error) { console.error(`小智 MCP 加密凭据读取失败：${error instanceof Error ? error.message : String(error)}`); }
+  }
   xiaozhiMcp = new XiaozhiMcpConnector(
-    options.xiaozhiMcpEndpoint,
+    initialXiaozhiEndpoint,
     createCloudMcpServer,
     options.xiaozhiReconnectInitialMs,
     options.xiaozhiReconnectMaxMs,
+    options.xiaozhiMcpEndpointStore?.kind ?? "memory",
   );
-  const mcpHandler = createMcpHandler(createCloudMcpServer);
+  const mcpHandler = createMcpHandler(() => createBridgeMcpServer(runtime, {
+    getXiaozhiMcpStatus: () => xiaozhiMcp.getStatus(),
+  }));
   const handleMcp = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
@@ -209,7 +244,9 @@ export async function startBridgeServer(options: {
         }
         const body = await readJson(request);
         if (typeof body.endpoint !== "string") throw new Error("endpoint 必须是字符串");
-        sendJson(response, 200, await xiaozhiMcp.configure(body.endpoint));
+        const endpoint = normalizeEndpoint(body.endpoint);
+        await options.xiaozhiMcpEndpointStore?.save(endpoint);
+        sendJson(response, 200, await xiaozhiMcp.configure(endpoint));
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/xiaozhi-mcp/disconnect") {
@@ -218,7 +255,9 @@ export async function startBridgeServer(options: {
           sendJson(response, 403, { error: "仅允许本机配置小智 MCP" });
           return;
         }
-        sendJson(response, 200, await xiaozhiMcp.disable());
+        const status = await xiaozhiMcp.disable();
+        await options.xiaozhiMcpEndpointStore?.clear();
+        sendJson(response, 200, status);
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/projects") {
@@ -249,9 +288,50 @@ export async function startBridgeServer(options: {
         }
         const body = await readJson(request);
         if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 600) throw new Error("text 需要 1–600 个字符");
+        if (body.mode !== undefined && body.mode !== "notify" && body.mode !== "command") throw new Error("mode 只能是 notify 或 command");
         const accepted = await runtime.xiaozhi.speak({ type: "speak_request", session_id: crypto.randomUUID(),
-          event_id: crypto.randomUUID(), event_type: "result", text: body.text.trim() });
-        sendJson(response, accepted ? 200 : 409, { accepted });
+          event_id: crypto.randomUUID(), event_type: "result", text: body.text.trim(),
+          intent: body.mode === "command" ? "command" : "notify" });
+        sendJson(response, accepted ? 200 : 409, { accepted, mode: body.mode === "command" ? "command" : "notify" });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/usb/workbuddy") {
+        const remote = request.socket.remoteAddress;
+        if (remote !== "127.0.0.1" && remote !== "::1" && remote !== "::ffff:127.0.0.1") {
+          sendJson(response, 403, { error: "仅允许本机发起 USB WorkBuddy 指令" });
+          return;
+        }
+        const body = await readJson(request);
+        if (typeof body.project !== "string" || !body.project.trim() || body.project.length > 200) throw new Error("project 需要 1–200 个字符");
+        if (typeof body.message !== "string" || !body.message.trim() || body.message.length > 600) throw new Error("message 需要 1–600 个字符");
+        const projects = await runtime.workbuddy.listProjects();
+        const needle = body.project.trim().toLocaleLowerCase();
+        const exact = projects.filter((item) => item.id.toLocaleLowerCase() === needle || item.name.toLocaleLowerCase() === needle);
+        if (exact.length !== 1) throw new Error(`没有准确匹配项目“${body.project.trim()}”，不会模糊投递`);
+        const commandId = crypto.randomUUID();
+        pendingUsbCommand = { id: commandId, project: exact[0]!.id, message: body.message.trim(), expiresAt: Date.now() + 120_000 };
+        const triggers = [
+          "使用工作伙伴工具继续当前项目。发送消息：只回复USB测试成功。",
+          "请调用工作伙伴项目的发送消息功能，必须执行工具，不要口头回答。",
+          "查询工作伙伴项目，然后使用工具发送任务消息。",
+        ];
+        let accepted = false;
+        let dispatched = false;
+        let attempts = 0;
+        for (const trigger of triggers) {
+          if (!pendingUsbCommand || pendingUsbCommand.id !== commandId) {
+            dispatched = true;
+            break;
+          }
+          if (!await waitUntil(() => runtime.xiaozhi.getState() === "idle", 12_000)) break;
+          attempts += 1;
+          accepted = await runtime.xiaozhi.speak({ type: "speak_request", session_id: crypto.randomUUID(),
+            event_id: commandId, event_type: "result", intent: "command", text: trigger }) || accepted;
+          dispatched = pendingUsbCommand?.id !== commandId;
+          if (dispatched) break;
+        }
+        if (pendingUsbCommand?.id === commandId) pendingUsbCommand = undefined;
+        sendJson(response, accepted ? 200 : 409, { accepted, dispatched, attempts, commandId, project: exact[0]!.name });
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/state") {

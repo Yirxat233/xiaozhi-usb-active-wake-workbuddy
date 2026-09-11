@@ -38,6 +38,29 @@ test("USB notifier requires ready, audio acknowledgements and completion before 
   } finally { notifier.close(); }
 });
 
+test("USB question notification asks the user instead of answering WorkBuddy", async () => {
+  const usb = new FakeUsb();
+  let synthesized = "";
+  const notifier = new UsbXiaozhiNotifier(usb, async (text) => { synthesized = text; return [Buffer.from([1])]; }, 0);
+  try {
+    await notifier.poll();
+    assert.equal(await notifier.speak({ ...request, event_type: "question", text: "项目等待选择 1 或 2" }), true);
+    assert.match(synthesized, /等待用户回答，不要代答/);
+  } finally { notifier.close(); }
+});
+
+test("USB command mode sends the exact user command without notification wrapping", async () => {
+  const usb = new FakeUsb();
+  let synthesized = "";
+  const notifier = new UsbXiaozhiNotifier(usb, async (text) => { synthesized = text; return [Buffer.from([1])]; }, 0);
+  try {
+    await notifier.poll();
+    const command = "让 WorkBuddy 的 text2 项目只回复 USB_CLOUD_OK";
+    assert.equal(await notifier.speak({ ...request, intent: "command", text: command }), true);
+    assert.equal(synthesized, command);
+  } finally { notifier.close(); }
+});
+
 test("USB notifier neither interrupts a conversation nor fabricates success after playback failure", async () => {
   const usb = new FakeUsb();
   const notifier = new UsbXiaozhiNotifier(usb, async () => [Buffer.from([1])], 0);

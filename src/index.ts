@@ -1,11 +1,15 @@
 import { startBridgeServer } from "./http-server.js";
 import { UsbXiaozhiNotifier } from "./usb-xiaozhi.js";
+import { WindowsDpapiXiaozhiEndpointStore } from "./xiaozhi-endpoint-store.js";
 
 const port = Number(process.env.BRIDGE_PORT ?? 8787);
 const host = process.env.BRIDGE_HOST ?? "127.0.0.1";
 const stepDelayMs = Number(process.env.MOCK_STEP_DELAY_MS ?? 250);
 const adapter = process.env.WORKBUDDY_ADAPTER === "codebuddy" ? "codebuddy" : "mock";
 const projectRoots = process.env.WORKBUDDY_PROJECT_ROOTS?.split(";").map((item) => item.trim()).filter(Boolean);
+const endpointStore = process.env.XIAOZHI_MCP_CREDENTIAL_FILE
+  ? new WindowsDpapiXiaozhiEndpointStore(process.env.XIAOZHI_MCP_CREDENTIAL_FILE)
+  : undefined;
 const handle = await startBridgeServer({
   xiaozhiNotifier: process.env.XIAOZHI_NOTIFIER === "usb" ? new UsbXiaozhiNotifier() : undefined,
   host,
@@ -17,6 +21,7 @@ const handle = await startBridgeServer({
   workbuddySessionRoot: process.env.WORKBUDDY_SESSION_ROOT,
   workbuddyConfigDir: process.env.WORKBUDDY_CONFIG_DIR,
   workbuddyStateFile: process.env.WORKBUDDY_STATE_FILE,
+  notificationQueueFile: process.env.NOTIFICATION_QUEUE_FILE,
   codebuddyCliScript: process.env.CODEBUDDY_CLI_SCRIPT,
   workbuddyDesktopTransport: process.env.WORKBUDDY_TRANSPORT as "auto" | "desktop" | "cli" | undefined,
   workbuddyDesktopTimeoutMs: process.env.WORKBUDDY_DESKTOP_TIMEOUT_MS
@@ -29,6 +34,7 @@ const handle = await startBridgeServer({
   xiaozhiReconnectMaxMs: process.env.XIAOZHI_MCP_RECONNECT_MAX_MS
     ? Number(process.env.XIAOZHI_MCP_RECONNECT_MAX_MS)
     : undefined,
+  xiaozhiMcpEndpointStore: endpointStore,
 });
 
 console.log(`Xiaozhi WorkBuddy Bridge: ${handle.baseUrl}`);

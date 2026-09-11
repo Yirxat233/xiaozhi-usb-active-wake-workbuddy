@@ -16,7 +16,11 @@ export interface XiaozhiMcpStatus {
   disconnectCount: number;
   messageCount: number;
   toolCallCount: number;
+  lastToolName?: string;
+  lastToolCallAt?: string;
+  recentToolNames?: string[];
   lastError?: string;
+  credentialStorage: "memory" | "windows-dpapi";
 }
 
 interface CloseDetails {
@@ -168,6 +172,7 @@ export class XiaozhiMcpConnector {
     private readonly createServer: () => McpServer,
     private readonly reconnectInitialMs = 1_000,
     private readonly reconnectMaxMs = 60_000,
+    private readonly credentialStorage: "memory" | "windows-dpapi" = "memory",
   ) {
     this.status = {
       configured: Boolean(endpoint),
@@ -178,6 +183,7 @@ export class XiaozhiMcpConnector {
       disconnectCount: 0,
       messageCount: 0,
       toolCallCount: 0,
+      credentialStorage,
     };
   }
 
@@ -202,6 +208,7 @@ export class XiaozhiMcpConnector {
       disconnectCount: 0,
       messageCount: 0,
       toolCallCount: 0,
+      credentialStorage: this.credentialStorage,
     };
     this.start();
     return this.getStatus();
@@ -219,6 +226,7 @@ export class XiaozhiMcpConnector {
       disconnectCount: this.status.disconnectCount,
       messageCount: this.status.messageCount,
       toolCallCount: this.status.toolCallCount,
+      credentialStorage: this.credentialStorage,
     };
     return this.getStatus();
   }
@@ -302,11 +310,19 @@ export class XiaozhiMcpConnector {
   private recordInbound(message: JSONRPCMessage): void {
     this.status.messageCount += 1;
     this.status.lastMessageAt = new Date().toISOString();
-    if ("method" in message && message.method === "tools/call") this.status.toolCallCount += 1;
+    if ("method" in message && message.method === "tools/call") {
+      this.status.toolCallCount += 1;
+      this.status.lastToolCallAt = new Date().toISOString();
+      const name = (message as { params?: { name?: unknown } }).params?.name;
+      if (typeof name === "string") {
+        this.status.lastToolName = name;
+        this.status.recentToolNames = [...(this.status.recentToolNames ?? []), name].slice(-10);
+      }
+    }
   }
 }
 
-function normalizeEndpoint(raw: string): string {
+export function normalizeEndpoint(raw: string): string {
   const value = raw.trim().replace(/^wss\\:\/\//i, "wss://").replace(/^ws\\:\/\//i, "ws://");
   if (!value || value.length > 4_096) throw new Error("小智 MCP 地址无效");
   let url: URL;

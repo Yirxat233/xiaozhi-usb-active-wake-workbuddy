@@ -23,6 +23,8 @@ export interface WorkBuddySession {
   updatedAt: string;
   firstUserMessage?: string;
   lastAssistantMessage?: string;
+  lastAssistantMessageId?: string;
+  pendingQuestion?: string;
   messageCount: number;
   file: string;
   active: boolean;
@@ -57,6 +59,7 @@ export interface WorkBuddyAdapter {
   listSessions?(projectId?: string): Promise<WorkBuddySession[]>;
   subscribe(listener: (event: WorkBuddyEvent) => void): () => void;
   diagnostics?(): Promise<WorkBuddyDiagnostics>;
+  close?(): void;
 }
 
 export interface WorkBuddyDiagnostics {
@@ -72,6 +75,11 @@ export interface WorkBuddyDiagnostics {
   stateFile?: string;
   sessionRoot?: string;
   configDir?: string;
+  desktopSessionIndexFile?: string;
+  desktopDatabaseFile?: string;
+  desktopWorkspaceRegistered?: boolean;
+  externalSessionMonitor?: boolean;
+  externalWatchIntervalMs?: number;
   transport?: string;
   desktopRunning?: boolean;
   desktopHelper?: string;
@@ -87,6 +95,7 @@ export interface SpeakRequest {
   text: string;
   event_id: string;
   event_type: WorkBuddyEventType;
+  intent?: "notify" | "command";
 }
 
 export interface SpeakRecord {

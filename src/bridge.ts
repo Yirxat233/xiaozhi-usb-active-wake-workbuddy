@@ -23,6 +23,7 @@ export class BridgeRuntime {
     workbuddySessionRoot?: string;
     workbuddyConfigDir?: string;
     workbuddyStateFile?: string;
+    notificationQueueFile?: string;
     codebuddyCliScript?: string;
     workbuddyDesktopTransport?: "auto" | "desktop" | "cli";
     workbuddyDesktopTimeoutMs?: number;
@@ -43,7 +44,7 @@ export class BridgeRuntime {
         })
       : new MockWorkBuddyAdapter(options.stepDelayMs);
     this.xiaozhi = options.xiaozhiNotifier ?? new MockXiaozhiNotifier();
-    this.dispatcher = new NotificationDispatcher(this.workbuddy, this.xiaozhi);
+    this.dispatcher = new NotificationDispatcher(this.workbuddy, this.xiaozhi, options.notificationQueueFile);
   }
 
   async voiceCommand(text: string): Promise<{ reply: string; data?: Project | Project[] }> {
@@ -96,6 +97,7 @@ export class BridgeRuntime {
 
   close(): void {
     this.dispatcher.close();
+    this.workbuddy.close?.();
     this.xiaozhi.close?.();
   }
 }

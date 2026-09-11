@@ -12,6 +12,12 @@ parser.add_argument('--port', default='COM5')
 args = parser.parse_args()
 commands = queue.Queue(maxsize=100)
 stopped = threading.Event()
+diagnostic_markers = (
+    'StateMachine: State:',
+    'StateMachine: Invalid state transition:',
+    'Application: Wake word detected:',
+    'WorkBuddyUSB:',
+)
 
 def emit(value):
     print(json.dumps(value, ensure_ascii=False), flush=True)
@@ -58,6 +64,13 @@ while not stopped.is_set():
                     if marker >= 0:
                         try:
                             emit(json.loads(line[marker + 7:].decode('utf-8')))
+                        except (ValueError, UnicodeDecodeError):
+                            pass
+                    else:
+                        try:
+                            decoded_line = line.decode('utf-8', errors='replace').strip()
+                            if any(item in decoded_line for item in diagnostic_markers):
+                                print(f'[device] {decoded_line}', file=sys.stderr, flush=True)
                         except (ValueError, UnicodeDecodeError):
                             pass
                 if len(buffer) > 65536:

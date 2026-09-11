@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { access, copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { backup, DatabaseSync } from "node:sqlite";
 import type {
   ListProjectsFilter,
   Project,
@@ -29,6 +30,7 @@ export interface CodeBuddyCliOptions {
   permissionMode?: "default" | "acceptEdits" | "auto" | "dontAsk" | "plan";
   tools?: string;
   maxTurns?: number;
+  externalWatchIntervalMs?: number;
 }
 
 type StreamMessage = {
@@ -60,9 +62,33 @@ type PersistedState = {
   version: 1;
   activeProjectId?: string;
   projects: Record<string, { cwd: string; latestSessionId?: string }>;
+  observedSessions?: Record<string, ObservedSessionState>;
+};
+
+type ObservedSessionState = {
+  assistantMessageId?: string;
+  assistantTextHash?: string;
+  pendingQuestionHash?: string;
+  updatedAt: string;
+  messageCount: number;
 };
 
 type ProjectRecord = { project: Project; sessionId?: string };
+
+type DesktopSessionMeta = {
+  conversationId: string;
+  userId: string;
+  workDir: string;
+  startedAt: string;
+  resumedAt: string;
+  title?: string;
+};
+
+type DesktopSessionIndex = {
+  version: 1;
+  updatedAt: string;
+  sessions: DesktopSessionMeta[];
+};
 
 const clone = <T>(value: T): T => structuredClone(value);
 const pathKey = (value: string): string => resolve(value).replaceAll("\\", "/").toLocaleLowerCase();
@@ -83,6 +109,8 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
   private readonly projectRoots: string[];
   private readonly sessionRoot: string;
   private readonly configDir: string;
+  private readonly desktopSessionIndexFile: string;
+  private readonly desktopDatabaseFile: string;
   private readonly stateFile: string;
   private readonly desktopTransport: "auto" | "desktop" | "cli";
   private readonly desktopReveal: boolean;
@@ -96,6 +124,12 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
   private desktopRunningCache?: { checkedAt: number; value: boolean };
   private persistedState: PersistedState = { version: 1, projects: {} };
   private persistQueue: Promise<void> = Promise.resolve();
+  private desktopIndexQueue: Promise<void> = Promise.resolve();
+  private desktopDatabaseBackup?: Promise<void>;
+  private externalMonitorTimer?: NodeJS.Timeout;
+  private externalMonitorRunning = false;
+  private closed = false;
+  private readonly externalWatchIntervalMs: number;
   private readonly ready: Promise<void>;
 
   constructor(private readonly options: CodeBuddyCliOptions) {
@@ -106,11 +140,14 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     );
     this.projectRoots = [...new Set((options.projectRoots?.length ? options.projectRoots : [join(userProfile, "WorkBuddy")]).map((root) => resolve(root)))];
     this.configDir = resolve(options.configDir ?? (options.sessionRoot ? dirname(options.sessionRoot) : join(userProfile, ".workbuddy")));
+    this.desktopSessionIndexFile = join(this.configDir, "app", "sessions.json");
+    this.desktopDatabaseFile = join(this.configDir, "workbuddy.db");
     this.sessionRoot = resolve(options.sessionRoot ?? join(this.configDir, "projects"));
     this.stateFile = resolve(options.stateFile ?? join(process.cwd(), "data", "workbuddy-state.json"));
     this.desktopTransport = options.desktopTransport
       ?? (process.platform === "win32" && pathKey(this.sessionRoot).includes("/.workbuddy/projects") ? "auto" : "cli");
     this.desktopReveal = options.desktopReveal ?? true;
+    this.externalWatchIntervalMs = Math.max(250, options.externalWatchIntervalMs ?? 2_000);
     this.ready = this.initialize();
   }
 
@@ -212,8 +249,7 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
   async listSessions(projectId?: string): Promise<WorkBuddySession[]> {
     await this.ready;
     await this.discover();
-    const selectedId = projectId;
-    if (projectId) this.requireProject(projectId);
+    const selectedId = projectId ? this.requireProject(projectId).project.id : undefined;
     return this.sessions
       .filter((session) => !selectedId || session.projectId === selectedId)
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
@@ -233,6 +269,11 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     return () => this.emitter.off("event", listener);
   }
 
+  close(): void {
+    this.closed = true;
+    if (this.externalMonitorTimer) clearInterval(this.externalMonitorTimer);
+  }
+
   async diagnostics(): Promise<WorkBuddyDiagnostics> {
     await this.ready;
     try {
@@ -242,6 +283,9 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
       const version = this.versionCache ?? await this.readVersion();
       this.versionCache = version;
       const active = this.activeProjectId ? this.projects.get(this.activeProjectId) : undefined;
+      const desktopWorkspaceRegistered = active?.sessionId && active.project.cwd
+        ? await this.isDesktopWorkspaceRegistered(active.sessionId, active.project.cwd)
+        : undefined;
       return {
         adapter: "CodeBuddyCliAdapter",
         connected: true,
@@ -255,6 +299,11 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
         stateFile: this.stateFile,
         sessionRoot: this.sessionRoot,
         configDir: this.configDir,
+        desktopSessionIndexFile: this.desktopSessionIndexFile,
+        desktopDatabaseFile: this.desktopDatabaseFile,
+        desktopWorkspaceRegistered,
+        externalSessionMonitor: !this.closed && Boolean(this.externalMonitorTimer),
+        externalWatchIntervalMs: this.externalWatchIntervalMs,
         transport: this.desktopTransport === "cli" ? "cli" : "cli+desktop-reveal",
         desktopRunning,
         persistenceError: this.persistenceError,
@@ -272,6 +321,10 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
         stateFile: this.stateFile,
         sessionRoot: this.sessionRoot,
         configDir: this.configDir,
+        desktopSessionIndexFile: this.desktopSessionIndexFile,
+        desktopDatabaseFile: this.desktopDatabaseFile,
+        externalSessionMonitor: !this.closed && Boolean(this.externalMonitorTimer),
+        externalWatchIntervalMs: this.externalWatchIntervalMs,
         transport: this.desktopTransport === "cli" ? "cli" : "cli+desktop-reveal",
         desktopRunning: this.desktopTransport === "cli" ? undefined : false,
         persistenceError: this.persistenceError,
@@ -282,13 +335,17 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
 
   private async initialize(): Promise<void> {
     this.persistedState = await this.readPersistedState();
+    const hadObservedSessions = this.persistedState.observedSessions !== undefined;
     await this.discover();
     const restored = this.persistedState.activeProjectId && this.projects.has(this.persistedState.activeProjectId)
       ? this.persistedState.activeProjectId
       : undefined;
     const configuredId = projectIdFor(this.options.cwd);
     this.setActiveProject(restored ?? (this.projects.has(configuredId) ? configuredId : this.newestProjectId()));
+    await this.reconcileExternalSessions(hadObservedSessions);
     await this.persistState();
+    this.externalMonitorTimer = setInterval(() => void this.monitorExternalSessions(), this.externalWatchIntervalMs);
+    this.externalMonitorTimer.unref();
   }
 
   private async discover(): Promise<void> {
@@ -380,6 +437,10 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     let title: string | undefined;
     let firstUserMessage: string | undefined;
     let lastAssistantMessage: string | undefined;
+    let lastAssistantMessageId: string | undefined;
+    let pendingQuestion: string | undefined;
+    let lastUserAt = 0;
+    let lastAssistantAt = 0;
     let latestTimestamp: string | undefined;
     let messageCount = 0;
     for (const line of raw.split(/\r?\n/)) {
@@ -390,11 +451,25 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
         sessionId = entry.sessionId ?? entry.session_id ?? sessionId;
         if (entry.aiTitle?.trim()) title = entry.aiTitle.trim();
         if (entry.type === "message") {
+          const messageAt = entry.timestamp === undefined
+            ? fileStat.mtime.getTime()
+            : typeof entry.timestamp === "number" ? entry.timestamp : Date.parse(entry.timestamp);
           const text = textFromContent(entry.content);
+          if (entry.role === "assistant") {
+            lastAssistantAt = Number.isFinite(messageAt) ? messageAt : fileStat.mtime.getTime();
+            lastAssistantMessageId = entry.id;
+            const questionBlock = entry.content?.find((item) => item.name === "AskUserQuestion");
+            pendingQuestion = questionBlock?.input ? this.extractQuestion(questionBlock.input) : undefined;
+          } else if (entry.role === "user") {
+            lastUserAt = Number.isFinite(messageAt) ? messageAt : fileStat.mtime.getTime();
+            pendingQuestion = undefined;
+          }
           if (text) {
             messageCount += 1;
             if (entry.role === "user" && !firstUserMessage) firstUserMessage = text;
-            if (entry.role === "assistant") lastAssistantMessage = text;
+            if (entry.role === "assistant") {
+              lastAssistantMessage = text;
+            }
           }
         }
         const timestamp = asIso(entry.timestamp, fileStat.mtime);
@@ -404,6 +479,9 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
       }
     }
     if (!cwd) return undefined;
+    if (!pendingQuestion && lastAssistantMessage && lastAssistantAt >= lastUserAt) {
+      pendingQuestion = this.inferPendingQuestion(lastAssistantMessage);
+    }
     return {
       id: sessionId,
       projectId: projectIdFor(cwd),
@@ -412,10 +490,85 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
       updatedAt: latestTimestamp ?? fileStat.mtime.toISOString(),
       firstUserMessage,
       lastAssistantMessage,
+      lastAssistantMessageId,
+      pendingQuestion,
       messageCount,
       file,
       active: false,
     };
+  }
+
+  private sessionObservation(session: WorkBuddySession): ObservedSessionState {
+    return {
+      assistantMessageId: session.lastAssistantMessageId,
+      assistantTextHash: session.lastAssistantMessage
+        ? createHash("sha256").update(session.lastAssistantMessage).digest("hex")
+        : undefined,
+      pendingQuestionHash: session.pendingQuestion
+        ? createHash("sha256").update(session.pendingQuestion).digest("hex")
+        : undefined,
+      updatedAt: session.updatedAt,
+      messageCount: session.messageCount,
+    };
+  }
+
+  private async monitorExternalSessions(): Promise<void> {
+    if (this.closed || this.externalMonitorRunning) return;
+    this.externalMonitorRunning = true;
+    try {
+      await this.discover();
+      this.reconcileExternalSessions(true);
+      await this.persistState();
+    } catch (error) {
+      this.recordPersistenceError(error);
+    } finally {
+      this.externalMonitorRunning = false;
+    }
+  }
+
+  private reconcileExternalSessions(notifyChanges: boolean): void {
+    const previous = this.persistedState.observedSessions ?? {};
+    const current: Record<string, ObservedSessionState> = {};
+    for (const session of this.sessions) {
+      const observation = this.sessionObservation(session);
+      current[session.id] = observation;
+      const prior = previous[session.id];
+      const assistantChanged = Boolean(
+        session.lastAssistantMessage
+        && (prior?.assistantMessageId !== observation.assistantMessageId
+          || prior?.assistantTextHash !== observation.assistantTextHash),
+      );
+      const questionChanged = Boolean(
+        session.pendingQuestion
+        && prior?.pendingQuestionHash !== observation.pendingQuestionHash,
+      );
+      if (!notifyChanges || this.runningProjectId === session.projectId || (!assistantChanged && !questionChanged)) continue;
+      const record = this.projects.get(session.projectId);
+      if (!record) continue;
+      if (questionChanged && session.pendingQuestion) {
+        record.project.status = "waiting_input";
+        record.project.progress = Math.max(record.project.progress, 65);
+        record.project.pendingQuestion = session.pendingQuestion;
+        record.project.lastMessage = session.pendingQuestion;
+        this.touch(record.project);
+        this.emit(record.project, "question", `真实 WorkBuddy 需要你的回答：${session.pendingQuestion}`, session.pendingQuestion);
+      } else if (assistantChanged && session.lastAssistantMessage) {
+        record.project.status = "completed";
+        record.project.progress = 100;
+        record.project.pendingQuestion = undefined;
+        record.project.lastMessage = session.lastAssistantMessage;
+        this.touch(record.project);
+        this.emit(record.project, "result", session.lastAssistantMessage);
+      }
+    }
+    this.persistedState.observedSessions = current;
+  }
+
+  private async markSessionObserved(sessionId: string): Promise<void> {
+    const session = (await this.discoverSessions()).find((item) => item.id === sessionId);
+    if (!session) return;
+    this.persistedState.observedSessions ??= {};
+    this.persistedState.observedSessions[sessionId] = this.sessionObservation(session);
   }
 
   private async runAgent(record: ProjectRecord, instruction: string): Promise<void> {
@@ -427,13 +580,25 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
   }
 
   private async finishCompleted(record: ProjectRecord, finalText: string): Promise<void> {
-    this.runningProjectId = undefined;
     this.lastError = undefined;
     record.project.progress = 100;
     record.project.lastMessage = finalText || "真实 WorkBuddy 任务执行完成";
     this.touch(record.project);
+    if (record.sessionId) await this.markSessionObserved(record.sessionId).catch((error) => this.recordPersistenceError(error));
+    if (record.sessionId && this.desktopTransport !== "cli") {
+      await this.recordDesktopSession(
+        record.sessionId,
+        record.project.cwd!,
+        record.project.name,
+        "completed",
+      ).catch((error) => {
+        this.recordPersistenceError(error);
+        this.emit(record.project, "progress", `任务已经执行完成，但 WorkBuddy 桌面会话登记失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     await this.persistState().catch((error) => this.recordPersistenceError(error));
     record.project.status = "completed";
+    this.runningProjectId = undefined;
     this.emit(record.project, "result", finalText || "真实 WorkBuddy 任务执行完成。");
   }
 
@@ -455,6 +620,7 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     let stderr = "";
     let finalText = "";
     let revealedSessionId: string | undefined;
+    let desktopPublish: Promise<void> = Promise.resolve();
     const toolNames = new Set<string>();
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => { stderr += chunk; });
@@ -469,9 +635,9 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
           record.project.sessionId = message.session_id;
           this.persistedState.projects[record.project.id] = { cwd: record.project.cwd!, latestSessionId: message.session_id };
           this.persistInBackground();
-          if (!revealedSessionId && this.desktopTransport !== "cli" && this.desktopReveal) {
+          if (!revealedSessionId && this.desktopTransport !== "cli") {
             revealedSessionId = message.session_id;
-            void this.revealDesktopSession(record, message.session_id);
+            desktopPublish = this.publishDesktopSession(record, message.session_id, this.desktopReveal);
           }
         }
         if (message.type === "system" && message.subtype === "init") {
@@ -521,6 +687,10 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
       child.once("close", async (code) => {
         if (settled) return;
         try {
+          await desktopPublish;
+          if (record.sessionId && this.desktopTransport !== "cli") {
+            await this.publishDesktopSession(record, record.sessionId, false);
+          }
           if (record.project.status === "waiting_input") {
             this.runningProjectId = undefined;
             await this.persistState().catch((error) => this.recordPersistenceError(error));
@@ -543,6 +713,163 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
         }
       });
     });
+  }
+
+  private async publishDesktopSession(record: ProjectRecord, sessionId: string, reveal: boolean): Promise<void> {
+    await this.recordDesktopSession(sessionId, record.project.cwd!, record.project.name, record.project.status).catch((error) => {
+      this.recordPersistenceError(error);
+      this.emit(record.project, "progress", `任务正在真实执行，但 WorkBuddy 桌面会话登记失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (reveal) await this.revealDesktopSession(record, sessionId);
+  }
+
+  private async recordDesktopSession(sessionId: string, cwd: string, title: string | undefined, status: Project["status"]): Promise<void> {
+    this.desktopIndexQueue = this.desktopIndexQueue.catch(() => undefined).then(async () => {
+      const current = await this.readDesktopSessionIndex();
+      const now = new Date().toISOString();
+      const existing = current.sessions.find((item) => item.conversationId === sessionId);
+      const userId = existing?.userId
+        ?? current.sessions.find((item) => item.userId.trim())?.userId
+        ?? process.env.USERNAME
+        ?? "local";
+      const entry: DesktopSessionMeta = {
+        conversationId: sessionId,
+        userId,
+        workDir: resolve(cwd),
+        startedAt: existing?.startedAt ?? now,
+        resumedAt: now,
+        ...(title?.trim() ? { title: title.trim() } : existing?.title ? { title: existing.title } : {}),
+      };
+      const snapshot: DesktopSessionIndex = {
+        version: 1,
+        updatedAt: now,
+        sessions: [entry, ...current.sessions.filter((item) => item.conversationId !== sessionId)].slice(0, 10),
+      };
+      await mkdir(dirname(this.desktopSessionIndexFile), { recursive: true });
+      const temporary = `${this.desktopSessionIndexFile}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+      try {
+        await rename(temporary, this.desktopSessionIndexFile);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "EPERM") throw error;
+        await copyFile(temporary, this.desktopSessionIndexFile);
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+      await this.recordDesktopDatabaseSession(entry, status);
+    });
+    return this.desktopIndexQueue;
+  }
+
+  private async recordDesktopDatabaseSession(entry: DesktopSessionMeta, status: Project["status"]): Promise<void> {
+    if (!await access(this.desktopDatabaseFile).then(() => true).catch(() => false)) return;
+    await this.ensureDesktopDatabaseBackup();
+    const database = new DatabaseSync(this.desktopDatabaseFile, { timeout: 5_000 });
+    try {
+      const requiredTables = database.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('sessions', 'workspaces')",
+      ).all() as Array<{ name: string }>;
+      if (requiredTables.length !== 2) throw new Error("WorkBuddy 数据库缺少 sessions/workspaces 表");
+      const existingUser = database.prepare(
+        "SELECT user_id FROM sessions WHERE user_id IS NOT NULL AND user_id <> '' ORDER BY updated_at DESC LIMIT 1",
+      ).get() as { user_id?: string } | undefined;
+      const userId = existingUser?.user_id ?? entry.userId;
+      const now = Date.parse(entry.resumedAt) || Date.now();
+      const createdAt = Date.parse(entry.startedAt) || now;
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.prepare(`
+          INSERT INTO sessions (
+            id, cwd, user_id, title, status, created_at, updated_at, last_activity_at,
+            deleted_at, is_playground, source_mode, mode, model, permission_mode, use_sandbox_cli
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'coding', 'craft', 'auto', ?, 0)
+          ON CONFLICT(id) DO UPDATE SET
+            cwd = excluded.cwd,
+            user_id = CASE WHEN sessions.user_id = '' THEN excluded.user_id ELSE sessions.user_id END,
+            title = COALESCE(sessions.title, excluded.title),
+            status = excluded.status,
+            updated_at = excluded.updated_at,
+            last_activity_at = excluded.last_activity_at,
+            deleted_at = NULL,
+            is_playground = 0,
+            source_mode = COALESCE(sessions.source_mode, excluded.source_mode)
+        `).run(
+          entry.conversationId,
+          resolve(entry.workDir),
+          userId,
+          entry.title ?? basename(entry.workDir),
+          status,
+          createdAt,
+          now,
+          now,
+          this.options.permissionMode ?? "default",
+        );
+        database.prepare(`
+          INSERT INTO workspaces (path, last_opened_at) VALUES (?, ?)
+          ON CONFLICT(path) DO UPDATE SET last_opened_at = excluded.last_opened_at
+        `).run(resolve(entry.workDir), now);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      database.close();
+    }
+  }
+
+  private async ensureDesktopDatabaseBackup(): Promise<void> {
+    if (!this.desktopDatabaseBackup) {
+      this.desktopDatabaseBackup = (async () => {
+        const directory = join(dirname(this.stateFile), "backups");
+        await mkdir(directory, { recursive: true });
+        const target = join(directory, `workbuddy-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}.db`);
+        const source = new DatabaseSync(this.desktopDatabaseFile, { readOnly: true, timeout: 5_000 });
+        try {
+          await backup(source, target);
+        } finally {
+          source.close();
+        }
+      })();
+    }
+    return this.desktopDatabaseBackup;
+  }
+
+  private async isDesktopWorkspaceRegistered(sessionId: string, cwd: string): Promise<boolean> {
+    if (!await access(this.desktopDatabaseFile).then(() => true).catch(() => false)) return false;
+    const database = new DatabaseSync(this.desktopDatabaseFile, { readOnly: true, timeout: 5_000 });
+    try {
+      const row = database.prepare(`
+        SELECT 1 AS registered
+        FROM sessions AS session
+        INNER JOIN workspaces AS workspace ON lower(workspace.path) = lower(session.cwd)
+        WHERE session.id = ?
+          AND lower(session.cwd) = lower(?)
+          AND session.is_playground = 0
+          AND session.deleted_at IS NULL
+        LIMIT 1
+      `).get(sessionId, resolve(cwd)) as { registered?: number } | undefined;
+      return row?.registered === 1;
+    } catch {
+      return false;
+    } finally {
+      database.close();
+    }
+  }
+
+  private async readDesktopSessionIndex(): Promise<DesktopSessionIndex> {
+    try {
+      const parsed = JSON.parse(await readFile(this.desktopSessionIndexFile, "utf8")) as Partial<DesktopSessionIndex>;
+      if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) return { version: 1, updatedAt: new Date(0).toISOString(), sessions: [] };
+      const sessions = parsed.sessions.filter((item): item is DesktopSessionMeta => Boolean(
+        item && typeof item.conversationId === "string" && typeof item.userId === "string"
+        && typeof item.workDir === "string" && typeof item.startedAt === "string" && typeof item.resumedAt === "string",
+      ));
+      return { version: 1, updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date(0).toISOString(), sessions };
+    } catch {
+      return { version: 1, updatedAt: new Date(0).toISOString(), sessions: [] };
+    }
   }
 
   private async revealDesktopSession(record: ProjectRecord, sessionId: string): Promise<void> {
@@ -570,9 +897,14 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
   private requireProject(projectId?: string): ProjectRecord {
     const selectedId = projectId ?? this.activeProjectId;
     if (!selectedId) throw new Error("尚未发现或打开 WorkBuddy 项目");
-    const record = this.projects.get(selectedId);
-    if (!record) throw new Error(`项目不存在：${selectedId}`);
-    return record;
+    const direct = this.projects.get(selectedId);
+    if (direct) return direct;
+    const needle = selectedId.trim().toLocaleLowerCase();
+    const matches = [...this.projects.values()].filter(({ project }) =>
+      project.name.toLocaleLowerCase() === needle || (project.cwd ? pathKey(project.cwd) === pathKey(selectedId) : false));
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length > 1) throw new Error(`项目名称不唯一：${selectedId}；请使用 workbuddy_list_projects 返回的项目 ID`);
+    throw new Error(`项目不存在：${selectedId}；请先调用 workbuddy_list_projects 获取真实项目名或 ID`);
   }
 
   private setActiveProject(projectId?: string): void {
@@ -606,7 +938,12 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     for (const [id, record] of this.projects) {
       if (record.project.cwd) projects[id] = { cwd: record.project.cwd, latestSessionId: record.sessionId };
     }
-    const snapshot: PersistedState = { version: 1, activeProjectId: this.activeProjectId, projects };
+    const snapshot: PersistedState = {
+      version: 1,
+      activeProjectId: this.activeProjectId,
+      projects,
+      observedSessions: this.persistedState.observedSessions ?? {},
+    };
     this.persistedState = snapshot;
     this.persistQueue = this.persistQueue.catch(() => undefined).then(() => this.writePersistedState(snapshot));
     return this.persistQueue;
@@ -634,7 +971,14 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     try {
       const value = JSON.parse(raw) as Partial<PersistedState>;
       return value.version === 1 && value.projects && typeof value.projects === "object"
-        ? { version: 1, activeProjectId: value.activeProjectId, projects: value.projects }
+        ? {
+            version: 1,
+            activeProjectId: value.activeProjectId,
+            projects: value.projects,
+            ...(value.observedSessions && typeof value.observedSessions === "object"
+              ? { observedSessions: value.observedSessions }
+              : {}),
+          }
         : undefined;
     } catch {
       return undefined;
@@ -695,6 +1039,7 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     record.project.lastMessage = message;
     this.touch(record.project);
     this.persistInBackground();
+    if (record.sessionId && this.desktopTransport !== "cli") void this.publishDesktopSession(record, record.sessionId, false);
     this.emit(record.project, "error", `真实 WorkBuddy 执行失败：${message}`);
   }
 
@@ -723,6 +1068,7 @@ export class CodeBuddyCliAdapter implements WorkBuddyAdapter {
     record.project.lastMessage = question;
     this.touch(record.project);
     this.persistInBackground();
+    if (record.sessionId && this.desktopTransport !== "cli") void this.publishDesktopSession(record, record.sessionId, false);
     this.emit(record.project, "question", `真实 WorkBuddy 需要你的回答：${question}`, question);
   }
 

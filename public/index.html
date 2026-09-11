@@ -88,11 +88,24 @@
           </form>
           <div id="command-response" class="command-response empty">命令响应将在这里显示</div>
 
+          <form id="usb-command-form" class="cloud-connect-form">
+            <div>
+              <p class="eyebrow">USB SILENT INPUT</p>
+              <h3>原样发送给真实小智</h3>
+              <small>项目名精确匹配，任务内容由 Bridge 暂存；即使语音识别缩短句子，也不会投递到错误项目。</small>
+            </div>
+            <input id="usb-project-input" maxlength="200" placeholder="准确项目名，例如：text2" />
+            <textarea id="usb-command-input" rows="2" maxlength="600" placeholder="发送给 WorkBuddy 的任务消息"></textarea>
+            <div class="cloud-connect-actions">
+              <button class="button primary" type="submit">通过 USB 发送指令</button>
+            </div>
+          </form>
+
           <form id="xiaozhi-mcp-form" class="cloud-connect-form">
             <div>
               <p class="eyebrow">XIAOZHI MCP CREDENTIAL</p>
               <h3>连接真实小智云端</h3>
-              <small>地址仅保存在 Bridge 进程内存中，页面与日志不会显示 Token。</small>
+              <small>地址用 Windows 当前用户 DPAPI 加密保存，页面与日志不会显示 Token；断开时会删除凭据。</small>
             </div>
             <input id="xiaozhi-mcp-endpoint" type="password" autocomplete="off" spellcheck="false" placeholder="wss://api.xiaozhi.me/mcp/?token=…" />
             <div class="cloud-connect-actions">

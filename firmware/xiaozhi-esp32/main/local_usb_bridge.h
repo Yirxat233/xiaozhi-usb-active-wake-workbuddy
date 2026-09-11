@@ -15,6 +15,9 @@ public:
     void Start();
     bool IsActive() const { return active_.load(); }
     bool IsLocalPlaybackActive() const { return mode_.load() == UsbBridgeMode::LocalPlayback; }
+    bool IsCloudInputActive() const {
+        return active_.load() && mode_.load() == UsbBridgeMode::CloudInput;
+    }
     void Cancel();  // Application main task only.
     void OnCloudReplyStarted();
     void OnCloudReplyFinished();

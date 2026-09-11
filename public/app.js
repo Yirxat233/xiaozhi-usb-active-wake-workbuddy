@@ -103,13 +103,18 @@ function renderSnapshot(snapshot) {
 function renderDiagnosis(snapshot) {
   const { workbuddy, xiaozhi } = snapshot;
   const issues = [];
-  if (!xiaozhi.mcp?.configured) issues.push({ type: "danger", mark: "!", title: "小智 MCP 云端未配置", detail: "设置 XIAOZHI_MCP_ENDPOINT 后重启 Bridge。" });
+  if (!xiaozhi.mcp?.configured) issues.push({ type: "danger", mark: "!", title: "小智 MCP 云端未配置", detail: "在左侧“连接真实小智云端”输入框粘贴 MCP 地址并点击连接；交付模式会使用 Windows DPAPI 加密保存。" });
   else if (!xiaozhi.mcp.connected) issues.push({ type: "warning", mark: "↻", title: `小智 MCP 云端 ${xiaozhi.mcp.state}`, detail: xiaozhi.mcp.lastError ?? "正在建立 WebSocket 长连接。" });
   if (state.mcpProbe && !state.mcpProbe.ok) issues.push({ type: "danger", mark: "!", title: "MCP 连接失败", detail: state.mcpProbe.error });
   if (!workbuddy.ok) issues.push({ type: "danger", mark: "!", title: "WorkBuddy Adapter 不可用", detail: workbuddy.diagnostics?.error ?? "无法连接 WorkBuddy。" });
   if (workbuddy.diagnostics?.transport === "cli+desktop-reveal" && workbuddy.diagnostics?.desktopRunning === false) issues.push({ type: "warning", mark: "!", title: "WorkBuddy 桌面端未运行", detail: "任务仍会由官方 CLI 执行，但无法自动显示对应桌面 Session。" });
   if (workbuddy.ok && workbuddy.diagnostics?.transport === "cli+desktop-reveal" && workbuddy.diagnostics?.desktopRunning === true) issues.push({ type: "good", mark: "✓", title: "真实执行通道已就绪", detail: "官方 CLI 负责提交与执行，WorkBuddy 桌面端自动打开同一个 Session。" });
+  if (workbuddy.diagnostics?.sessionId && workbuddy.diagnostics?.desktopWorkspaceRegistered === false) issues.push({ type: "warning", mark: "!", title: "当前项目尚未显示在 WorkBuddy 空间", detail: "Session 已找到，但 WorkBuddy 桌面空间登记缺失；继续执行一次该项目即可自动修复。" });
+  if (workbuddy.diagnostics?.desktopWorkspaceRegistered === true) issues.push({ type: "good", mark: "✓", title: "WorkBuddy 空间登记正常", detail: "当前项目的 Session 与文件夹已经登记到桌面左侧空间列表。" });
+  if (workbuddy.diagnostics?.externalSessionMonitor === true) issues.push({ type: "good", mark: "✓", title: "桌面任务提醒监控运行中", detail: `每 ${Math.round((workbuddy.diagnostics.externalWatchIntervalMs ?? 2000) / 1000)} 秒检查 WorkBuddy 的新问题和完成回复。` });
   if (workbuddy.diagnostics?.persistenceError) issues.push({ type: "warning", mark: "!", title: "Session 映射持久化异常", detail: workbuddy.diagnostics.persistenceError });
+  if (xiaozhi.dispatcher.persistenceError) issues.push({ type: "warning", mark: "!", title: "播报队列持久化异常", detail: xiaozhi.dispatcher.persistenceError });
+  if (xiaozhi.mcp?.configured && xiaozhi.mcp.credentialStorage === "windows-dpapi") issues.push({ type: "good", mark: "✓", title: "小智 MCP 凭据已加密", detail: "凭据由 Windows 当前用户 DPAPI 保护，Bridge 重启后可自动恢复连接。" });
   if (xiaozhi.state === "offline") issues.push({ type: "danger", mark: "!", title: "小智设备离线", detail: "主动播报无法发送，请检查设备或 MQTT 连接。" });
   if (xiaozhi.dispatcher.queued > 0 && xiaozhi.state !== "idle") issues.push({ type: "warning", mark: "↻", title: `${xiaozhi.dispatcher.queued} 条播报被阻塞`, detail: `设备当前为 ${xiaozhi.state}，切换到 idle 后队列会自动发送。` });
   if (workbuddy.pendingQuestions.length > 0) issues.push({ type: "warning", mark: "?", title: "任务正在等待用户回答", detail: workbuddy.pendingQuestions.map((p) => `${p.name}：${p.pendingQuestion}`).join("；") });
@@ -151,6 +156,8 @@ function renderSessions(sessions, diagnostics) {
     <div><span>SESSION ROOT</span><code title="${escapeHtml(diagnostics.sessionRoot)}">${escapeHtml(diagnostics.sessionRoot ?? "—")}</code></div>
     <div><span>CONFIG DIR</span><code title="${escapeHtml(diagnostics.configDir)}">${escapeHtml(diagnostics.configDir ?? "—")}</code></div>
     <div><span>STATE FILE</span><code title="${escapeHtml(diagnostics.stateFile)}">${escapeHtml(diagnostics.stateFile ?? "—")}</code></div>
+    <div><span>SPACE DB</span><code title="${escapeHtml(diagnostics.desktopDatabaseFile)}">${diagnostics.desktopWorkspaceRegistered === true ? "REGISTERED" : diagnostics.desktopWorkspaceRegistered === false ? "MISSING" : "N/A"} · ${escapeHtml(diagnostics.desktopDatabaseFile ?? "—")}</code></div>
+    <div><span>SESSION WATCH</span><code>${diagnostics.externalSessionMonitor === true ? "RUNNING" : "STOPPED"} · ${diagnostics.externalWatchIntervalMs ?? "—"} ms</code></div>
     <div><span>TRANSPORT</span><code>${escapeHtml(diagnostics.transport ?? "—")} · desktop ${diagnostics.desktopRunning === true ? "UP" : diagnostics.desktopRunning === false ? "DOWN" : "N/A"}</code></div>`;
   $("#sessions").innerHTML = sessions.length ? sessions.map((session) => `
     <article class="session-row ${session.active ? "active" : ""}">
@@ -273,6 +280,30 @@ async function sendVoice(text) {
   }
 }
 
+async function sendUsbCommand(project, message) {
+  const input = $("#usb-command-input");
+  const projectInput = $("#usb-project-input");
+  const button = $("#usb-command-form button[type=submit]");
+  button.disabled = true;
+  button.textContent = "USB 发送中…";
+  try {
+    const result = await request("/api/usb/workbuddy", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project, message }),
+    });
+    if (!result.accepted) throw new Error("小智设备当前没有接受指令");
+    if (!result.dispatched) throw new Error("小智完成了对话，但没有调用 WorkBuddy 发送工具");
+    input.value = "";
+    projectInput.value = "";
+    showToast(`USB 指令已提交到项目“${result.project}”`);
+    await refresh();
+  } catch (error) {
+    showToast(`USB 指令失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "通过 USB 发送指令";
+  }
+}
+
 async function setDeviceState(deviceState) {
   try {
     await request("/api/mock/device-state", {
@@ -290,7 +321,7 @@ async function connectXiaozhiMcp(endpoint) {
     await request("/api/xiaozhi-mcp/connect", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ endpoint }),
     });
-    showToast("小智 MCP 正在连接，Token 未写入磁盘");
+    showToast("小智 MCP 正在连接，Token 已用 Windows DPAPI 加密保存");
     await refresh();
   } catch (error) {
     showToast(`小智 MCP 连接失败：${error.message}`, true);
@@ -300,7 +331,7 @@ async function connectXiaozhiMcp(endpoint) {
 async function disconnectXiaozhiMcp() {
   try {
     await request("/api/xiaozhi-mcp/disconnect", { method: "POST" });
-    showToast("小智 MCP 已断开并从内存清除");
+    showToast("小智 MCP 已断开，加密凭据已经删除");
     await refresh();
   } catch (error) {
     showToast(`断开失败：${error.message}`, true);
@@ -320,6 +351,12 @@ $("#voice-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const text = $("#voice-input").value.trim();
   if (text) sendVoice(text);
+});
+$("#usb-command-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const project = $("#usb-project-input").value.trim();
+  const message = $("#usb-command-input").value.trim();
+  if (project && message) sendUsbCommand(project, message);
 });
 $("#xiaozhi-mcp-form").addEventListener("submit", (event) => {
   event.preventDefault();

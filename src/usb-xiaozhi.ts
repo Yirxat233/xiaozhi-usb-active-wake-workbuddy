@@ -38,7 +38,9 @@ export class PythonUsbTransport implements UsbTransport {
         }
       } catch { /* Only the worker's JSON protocol is consumed. */ }
     });
-    this.worker.stderr.on("data", () => undefined);
+    // Keep a narrow set of raw device state transitions in the Bridge log. The Python
+    // worker filters everything else, so voice text and noisy firmware logs stay out.
+    this.worker.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
     this.worker.on("error", () => this.disconnected());
     this.worker.on("exit", () => this.disconnected());
   }
@@ -115,14 +117,16 @@ export class UsbXiaozhiNotifier implements XiaozhiNotifier {
     this.updateState("connecting");
     let started = false;
     try {
-      const instruction = request.event_type === "question"
-        ? `请简短回答这个问题：${request.text}`
-        : `请直接向用户简短播报这条通知，不要解释：${request.text}`;
+      const instruction = request.intent === "command"
+        ? request.text
+        : request.event_type === "question"
+          ? `播报后等待用户回答，不要代答：${request.text}`
+          : `播报后结束：${request.text}`;
       const frames = await this.synthesize(instruction, 16000);
       const ready = await this.transport.request({ type: "ask_request", session_id: request.session_id, text: request.text });
       if (ready.type !== "ask_ready") throw new Error(ready.error ?? "设备当前忙碌");
       started = true;
-      this.updateState("speaking");
+      this.updateState("listening");
       for (let seq = 0; seq < frames.length; seq++) {
         if (this.closed) throw new Error("播报已取消");
         const ack = await this.transport.request({ type: "input_audio", session_id: request.session_id, seq, data: frames[seq]!.toString("base64") });
@@ -131,6 +135,7 @@ export class UsbXiaozhiNotifier implements XiaozhiNotifier {
       }
       const done = await this.transport.request({ type: "input_stop", session_id: request.session_id }, 90000);
       if (done.type !== "cloud_done") throw new Error(done.error ?? "小智没有完成回复");
+      if (done.state && done.state !== "idle") throw new Error(`小智回复结束后状态异常：${done.state}`);
       this.records.push({ request: structuredClone(request), ready: { session_id: request.session_id, type: "speak_ready", state: "ready" }, sentAt: new Date().toISOString() });
       if (this.records.length > 100) this.records.shift();
       this.lastError = undefined;
