@@ -117,24 +117,38 @@ export class UsbXiaozhiNotifier implements XiaozhiNotifier {
     this.updateState("connecting");
     let started = false;
     try {
+      const localCompletion = request.intent !== "command" && request.event_type === "result";
       const instruction = request.intent === "command"
         ? request.text
         : request.event_type === "question"
           ? `播报后等待用户回答，不要代答：${request.text}`
           : `播报后结束：${request.text}`;
-      const frames = await this.synthesize(instruction, 16000);
-      const ready = await this.transport.request({ type: "ask_request", session_id: request.session_id, text: request.text });
-      if (ready.type !== "ask_ready") throw new Error(ready.error ?? "设备当前忙碌");
+      const frames = await this.synthesize(localCompletion ? request.text : instruction, localCompletion ? 24000 : 16000);
+      const ready = await this.transport.request({
+        type: localCompletion ? "speak_request" : "ask_request",
+        session_id: request.session_id,
+        text: request.text,
+        event_type: request.event_type,
+      });
+      if (ready.type !== (localCompletion ? "speak_ready" : "ask_ready")) throw new Error(ready.error ?? "设备当前忙碌");
       started = true;
-      this.updateState("listening");
+      this.updateState(localCompletion ? "speaking" : "listening");
       for (let seq = 0; seq < frames.length; seq++) {
         if (this.closed) throw new Error("播报已取消");
-        const ack = await this.transport.request({ type: "input_audio", session_id: request.session_id, seq, data: frames[seq]!.toString("base64") });
-        if (ack.type !== "input_ack") throw new Error(ack.error ?? "设备拒绝输入音频");
+        const ack = await this.transport.request({
+          type: localCompletion ? "audio" : "input_audio",
+          session_id: request.session_id,
+          seq,
+          data: frames[seq]!.toString("base64"),
+        });
+        if (ack.type !== (localCompletion ? "audio_ack" : "input_ack")) throw new Error(ack.error ?? "设备拒绝输入音频");
         if (this.frameDelayMs) await delay(this.frameDelayMs);
       }
-      const done = await this.transport.request({ type: "input_stop", session_id: request.session_id }, 90000);
-      if (done.type !== "cloud_done") throw new Error(done.error ?? "小智没有完成回复");
+      const done = await this.transport.request({
+        type: localCompletion ? "tts_stop" : "input_stop",
+        session_id: request.session_id,
+      }, 90000);
+      if (done.type !== (localCompletion ? "speak_done" : "cloud_done")) throw new Error(done.error ?? "小智没有完成回复");
       if (done.state && done.state !== "idle") throw new Error(`小智回复结束后状态异常：${done.state}`);
       this.records.push({ request: structuredClone(request), ready: { session_id: request.session_id, type: "speak_ready", state: "ready" }, sentAt: new Date().toISOString() });
       if (this.records.length > 100) this.records.shift();

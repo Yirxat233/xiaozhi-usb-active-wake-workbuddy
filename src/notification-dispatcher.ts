@@ -121,10 +121,11 @@ export class NotificationDispatcher {
 
   private notificationText(event: WorkBuddyEvent): string {
     const projectName = compactForSpeech(event.projectName, 36);
-    const summary = compactForSpeech(event.summary, event.type === "result" ? 28 : event.type === "error" ? 48 : 60);
+    if (event.type === "result") return `WorkBuddy 项目“${projectName}”任务已完成。`;
+    const summary = compactForSpeech(event.summary, event.type === "error" ? 48 : 60);
     if (event.type === "question") return `WorkBuddy 项目“${projectName}”正在等待你的回答：${summary}`;
     if (event.type === "error") return `WorkBuddy 项目“${projectName}”执行失败：${summary}`;
-    return `“${projectName}”已完成：${summary}`;
+    return `WorkBuddy 项目“${projectName}”任务已完成。`;
   }
 
   private restore(): void {

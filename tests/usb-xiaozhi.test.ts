@@ -12,8 +12,11 @@ class FakeUsb implements UsbTransport {
   async request(message: Record<string, unknown>): Promise<UsbReply> {
     this.messages.push(message);
     if (message.type === "status") return { type: "status", state: this.state };
+    if (message.type === "speak_request") return { type: this.state === "idle" ? "speak_ready" : "busy" };
     if (message.type === "ask_request") return { type: this.state === "idle" ? "ask_ready" : "busy" };
+    if (message.type === "audio") return { type: this.rejectAudio ? "error" : "audio_ack" };
     if (message.type === "input_audio") return { type: this.rejectAudio ? "error" : "input_ack" };
+    if (message.type === "tts_stop") return { type: this.rejectDone ? "error" : "speak_done", state: "idle" };
     if (message.type === "input_stop") return { type: this.rejectDone ? "error" : "cloud_done" };
     return { type: "cancelled" };
   }
@@ -30,7 +33,7 @@ test("USB notifier requires ready, audio acknowledgements and completion before 
   try {
     await notifier.poll();
     assert.equal(await notifier.speak(request), true);
-    assert.deepEqual(usb.messages.map((item) => item.type), ["status", "ask_request", "input_audio", "input_audio", "input_stop"]);
+    assert.deepEqual(usb.messages.map((item) => item.type), ["status", "speak_request", "audio", "audio", "tts_stop"]);
     assert.equal(usb.messages[2]!.session_id, request.session_id);
     assert.equal(usb.messages[3]!.seq, 1);
     assert.equal(notifier.getRecords().length, 1);
@@ -72,7 +75,7 @@ test("USB notifier neither interrupts a conversation nor fabricates success afte
     usb.state = "idle";
     await notifier.poll();
     usb.rejectDone = true;
-    assert.equal(await notifier.speak(request), false);
+    assert.equal(await notifier.speak({ ...request, event_type: "question" }), false);
     assert.equal(notifier.getRecords().length, 0);
     assert.equal(usb.messages.at(-1)!.type, "cancel");
   } finally { notifier.close(); }

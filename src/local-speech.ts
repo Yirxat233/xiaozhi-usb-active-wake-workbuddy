@@ -53,7 +53,7 @@ export async function synthesizeLocalSpeech(text: string, sampleRate = 24000): P
     const wave = join(directory, "speech.wav");
     const ogg = join(directory, "speech.ogg");
     const request = join(directory, "request.json");
-    await writeFile(request, JSON.stringify({ text: normalized, output: wave }), "utf8");
+    await writeFile(request, JSON.stringify({ text: normalized, output: wave, rate: sampleRate === 24000 ? 2 : 0 }), "utf8");
     await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
       resolve("scripts/synthesize-speech.ps1"), "-RequestFile", request], { windowsHide: true, timeout: 90000 });
     await run(process.env.FFMPEG_PATH ?? "ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-i", wave,

@@ -1,6 +1,6 @@
 # Xiaozhi USB Active Wake for WorkBuddy
 
-通过 USB 让电脑主动向小智设备发起官方云端会话，无需说“你好小智”。当 WorkBuddy 的任务完成、需要用户回答或发生错误时，电脑将通知作为静默的上行语音送入设备；`xiaozhi.me` 完成识别和对话后，再由小智自己的角色与音色回复。
+通过 USB 让电脑主动控制小智设备，无需说“你好小智”。WorkBuddy 任务完成时，设备直接播报“项目名任务已完成”，不再进入聆听状态；需要用户回答或执行语音命令时，电脑再把输入作为静默上行音频送入设备，由 `xiaozhi.me` 完成识别、对话和 TTS。
 
 当前验证硬件为斑梨 / Guition JC3636W518 V2（ESP32-S3、360×360 圆屏、ST77916、PDM 麦克风），固件配置为 `taiji-pi-s3-pdm`。完整烧录和接线说明见 [LOCAL_USB_GUIDE.md](LOCAL_USB_GUIDE.md)。
 
@@ -159,4 +159,4 @@ npm run dev
 - `desktop` 模式要求 WorkBuddy 桌面程序已运行；`auto` 模式在桌面未运行时仍执行任务；`cli` 模式只执行，不自动打开桌面 Session。
 - Web 调试台对 `result/question/error` 显示页内弹窗；用户点击“启用系统通知”后还会产生浏览器系统通知。
 
-小智主动调用 WorkBuddy 的 MCP 路径与异步主动播报是两个方向的链路。现在可用 `UsbXiaozhiNotifier` 将 WorkBuddy 完成/提问事件送回本机 USB 连接的小智。设备忙碌时排队，播放完成后才记录成功；过长回复会压缩为项目名和短摘要，Web 弹窗保留全文，避免云端单轮聆听超时。待播报队列和最近事件 ID 原子保存到 `data/notification-queue.json`，Bridge 或 Windows 重启后会自动续播。
+小智主动调用 WorkBuddy 的 MCP 路径与异步主动播报是两个方向的链路。现在可用 `UsbXiaozhiNotifier` 将 WorkBuddy 完成/提问事件送回本机 USB 连接的小智。设备忙碌时排队，播放完成后才记录成功；完成事件通过 USB 本地直播放，只播报项目名和“任务已完成”，因此不会停在聆听状态，Web 弹窗保留完整回复。待播报队列和最近事件 ID 原子保存到 `data/notification-queue.json`，Bridge 或 Windows 重启后会自动续播。

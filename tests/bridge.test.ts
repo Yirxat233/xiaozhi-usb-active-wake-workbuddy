@@ -88,7 +88,8 @@ test("voice commands list, open and continue a project", async () => {
     const questionNotice = runtime.xiaozhi.getRecords().find((record) => record.request.event_type === "question");
     const resultNotice = runtime.xiaozhi.getRecords().find((record) => record.request.event_type === "result");
     assert.match(questionNotice?.request.text ?? "", /WorkBuddy 项目“小智 WorkBuddy Bridge”.*等待你的回答/);
-    assert.match(resultNotice?.request.text ?? "", /“小智 WorkBuddy Bridge”已完成.*详情见网页/);
+    assert.equal(resultNotice?.request.text, "WorkBuddy 项目“小智 WorkBuddy Bridge”任务已完成。");
+    assert.doesNotMatch(resultNotice?.request.text ?? "", /Mock 全链路验证通过/);
   } finally {
     runtime.close();
   }
