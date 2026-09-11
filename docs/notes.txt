@@ -1,0 +1,7 @@
+新版本硬件圆形片，带喇叭电池的，开发板选择 viewe-smartring-plus ， 
+代码 D:\workspace\2026\viewe-smartring-plus\main\boards\viewe-smartring-plus\viewe-smartring-plus.cc ：99 
+修改屏幕的参数，新屏幕 设置1，老屏幕设置 0 
+
+
+旧版本硬件圆形片，带磁吸供电的，开发板选择 taiji-pi-s3
+menuconfig  里 TAIJI_PI_S3 里I2Stype选择   I2S_TYPE_PDM ，在代码 D:\workspace\2026\viewe-smartring-plus\main\boards\taiji-pi-s3\taiji_pi_s3.cc: 19  行，是这个选择的分支。
